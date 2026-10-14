@@ -469,6 +469,7 @@ class OpenReplyBridge:
         # request that delivered it. Per-instance, never class-level, or two
         # bridges in one process would ack each other's commands.
         self._pending_acks: list[dict] = []
+        self._pending_lead_acks: list[str] = []
 
     # ── configuration, with defaults that are safe when unset ──────────────
 
@@ -518,6 +519,59 @@ class OpenReplyBridge:
         minted = await self._mint_links()
         pushed = await self._push()
         return {"minted": minted, **pushed}
+
+    async def _import_leads(self, leads: list[dict]) -> list[str]:
+        """Take people who asked for something and agreed to hear more.
+
+        These are the only inbound addresses that may ever be written to. The
+        control plane already checked that each one ticked the consent box and
+        that the copy it emailed was accepted; this side just has to not lose
+        them.
+
+        They arrive as ``email_status="verified"``, which is a claim worth
+        being precise about: the address was typed by its owner into a form to
+        receive something they wanted, and a message to it was accepted for
+        delivery. That is stronger evidence than the pattern-guessed addresses
+        Harvey normally works with, and weaker than a mailbox probe. If one
+        turns out to be wrong, Harvey's own bounce handling catches it and
+        max_bounce_rate pauses sending, which is the safety net that makes the
+        optimistic label safe to use.
+        """
+        from harvey.models import Prospect
+
+        imported: list[str] = []
+        for lead in leads:
+            email = (lead.get("email") or "").strip().lower()
+            if not email:
+                continue
+            name = (lead.get("name") or "").strip()
+            first, _, last = name.partition(" ")
+            try:
+                await self.state.add_prospect(
+                    Prospect(
+                        first_name=first or "",
+                        last_name=last.strip(),
+                        email=email,
+                        email_verified=True,
+                        email_status="verified",
+                        source=lead.get("source") or "openreply",
+                        status="new",
+                        personalization_notes=(
+                            f"Downloaded \"{lead['resourceTitle']}\" and opted in."
+                            if lead.get("resourceTitle")
+                            else ""
+                        ),
+                    )
+                )
+            except Exception as exc:
+                # One bad row must not cost the whole batch; it will be
+                # offered again on the next cycle because it stays unacked.
+                self.log.warning("openreply: could not import lead %s: %s", email, exc)
+                continue
+            # add_prospect returns the existing id on a duplicate, so acking
+            # here is correct either way: this lead has been dealt with.
+            imported.append(lead["id"])
+        return imported
 
     async def _mint_links(self) -> int:
         """Ask the control plane for one tracked link per eligible email, then
@@ -596,6 +650,7 @@ class OpenReplyBridge:
                 or "",
             },
             "acks": self._pending_acks,
+            "leadAcks": self._pending_lead_acks,
             "companies": [company_payload(row) for row in companies],
             "prospects": [prospect_payload(row) for row in prospects],
             "emails": [email_payload(row) for row in emails],
@@ -610,6 +665,7 @@ class OpenReplyBridge:
 
         # Acks were accepted, so stop resending them.
         self._pending_acks = []
+        self._pending_lead_acks = []
         self._consecutive_failures = 0
         await self.state.set_setting(LAST_OK_KEY, now_iso)
         await self.state.set_setting(LAST_ERROR_KEY, "")
@@ -621,7 +677,12 @@ class OpenReplyBridge:
         if emails:
             await self.state.set_setting(CURSOR_OUTBOX, _max_updated_at(emails))
 
-        commands = (response.get("data") or {}).get("commands") or []
+        data = response.get("data") or {}
+        # Imported before commands are applied: a lead that arrives and a
+        # command that acts on it in the same cycle should find it there.
+        self._pending_lead_acks = await self._import_leads(data.get("leads") or [])
+
+        commands = data.get("commands") or []
         applied = []
         for command in commands:
             applied.append(await self.applier.apply(command, now_iso))
@@ -635,6 +696,7 @@ class OpenReplyBridge:
             "emails": len(emails),
             "companies": len(companies),
             "commands": len(applied),
+            "leads": len(self._pending_lead_acks),
         }
 
     async def _rows_since(self, table: str, cursor: str) -> list[dict]:

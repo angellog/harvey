@@ -431,3 +431,105 @@ async def test_a_handler_blowing_up_does_not_stall_the_queue_behind_it():
 def test_expiry_check_treats_a_missing_expiry_as_no_expiry():
     assert not command_is_expired({}, NOW)
     assert not command_is_expired({"expiresAt": None}, NOW)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Importing resource leads
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class RecordingState(FakeState):
+    """Captures the prospects the bridge tries to create."""
+
+    def __init__(self):
+        super().__init__()
+        self.prospects = []
+
+    async def add_prospect(self, prospect):
+        self.prospects.append(prospect)
+        return f"p_{len(self.prospects)}"
+
+
+def _bridge(state):
+    from harvey.integrations.openreply import OpenReplyClient
+
+    return OpenReplyBridge(state, OpenReplyClient("https://x.test", "agent-1", "s"))
+
+
+def _lead(**kwargs):
+    return {
+        "id": "lead_1",
+        "email": "amina@kampalakicks.ug",
+        "name": "Amina Nakato",
+        "source": "resource:wholesale-checklist",
+        "resourceTitle": "The Wholesale Checklist",
+        **kwargs,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_lead_becomes_a_prospect_who_already_knows_the_brand():
+    state = RecordingState()
+    acks = await _bridge(state)._import_leads([_lead()])
+
+    assert acks == ["lead_1"]
+    prospect = state.prospects[0]
+    assert prospect.email == "amina@kampalakicks.ug"
+    assert prospect.first_name == "Amina"
+    assert prospect.last_name == "Nakato"
+    assert prospect.source == "resource:wholesale-checklist"
+    assert prospect.status == "new"
+    # They typed the address themselves to receive something, and a message to
+    # it was accepted. Harvey's gate refuses to send to anything less.
+    assert prospect.email_status == "verified"
+    assert "Wholesale Checklist" in prospect.personalization_notes
+
+
+@pytest.mark.asyncio
+async def test_a_one_word_name_does_not_invent_a_surname():
+    state = RecordingState()
+    await _bridge(state)._import_leads([_lead(name="Amina")])
+
+    assert state.prospects[0].first_name == "Amina"
+    assert state.prospects[0].last_name == ""
+
+
+@pytest.mark.asyncio
+async def test_a_lead_with_no_name_still_imports():
+    state = RecordingState()
+    acks = await _bridge(state)._import_leads([_lead(name=None)])
+
+    assert acks == ["lead_1"]
+    assert state.prospects[0].email == "amina@kampalakicks.ug"
+
+
+@pytest.mark.asyncio
+async def test_an_address_less_lead_is_skipped_rather_than_imported_blank():
+    state = RecordingState()
+    acks = await _bridge(state)._import_leads([_lead(email="")])
+
+    assert acks == []
+    assert state.prospects == []
+
+
+@pytest.mark.asyncio
+async def test_one_bad_row_does_not_cost_the_whole_batch():
+    class PartlyBroken(RecordingState):
+        async def add_prospect(self, prospect):
+            if prospect.email.startswith("bad"):
+                raise RuntimeError("constraint")
+            return await super().add_prospect(prospect)
+
+    state = PartlyBroken()
+    acks = await _bridge(state)._import_leads(
+        [_lead(id="good_1"), _lead(id="bad_1", email="bad@x.test"), _lead(id="good_2")]
+    )
+
+    # The failed one stays unacked, so it is offered again next cycle.
+    assert acks == ["good_1", "good_2"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_handover_is_not_an_error():
+    state = RecordingState()
+    assert await _bridge(state)._import_leads([]) == []
