@@ -1345,6 +1345,58 @@ class StateManager:
             ) as cursor:
                 return [dict(r) for r in await cursor.fetchall()]
 
+    # ── Incremental reads (for pushing changes to a control plane) ──
+
+    # Only these tables may be read this way. The table name is interpolated
+    # into SQL, so it is checked against this set rather than escaped: a
+    # caller cannot reach a table that was not meant to be readable.
+    SYNCABLE_TABLES = frozenset({"prospects", "outbox", "conversations", "companies"})
+
+    async def get_rows_updated_since(
+        self, table: str, since: str = "", limit: int = 200
+    ) -> list[dict]:
+        """Rows whose updated_at moved after ``since``, oldest first.
+
+        Oldest first on purpose: a caller that records the last row's
+        updated_at as its cursor then never skips a row, even if it only
+        manages to process part of a batch.
+
+        Both timestamp spellings in this database are compared on equal terms.
+        SQLite's CURRENT_TIMESTAMP writes "2026-10-15 09:00:00" while the
+        Python writers use isoformat(), "2026-10-15T09:00:00.123". Compared as
+        plain strings, "T" sorts above " ", so an ISO row at midnight would
+        look newer than a space-separated row at 23:59 the same day — and a
+        cursor taken from the first would skip the second for good. Replacing
+        the separator before comparing removes that cliff.
+        """
+        if table not in self.SYNCABLE_TABLES:
+            raise ValueError(f"table {table!r} is not syncable")
+        ordered = "REPLACE(updated_at, 'T', ' ')"
+        sql = f"SELECT * FROM {table}"
+        params: list = []
+        if since:
+            sql += f" WHERE {ordered} > ?"
+            params.append(str(since).replace("T", " "))
+        sql += f" ORDER BY {ordered} ASC LIMIT ?"
+        params.append(int(limit))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_companies_by_ids(self, company_ids: list[str]) -> list[dict]:
+        """The companies behind a batch of prospects, in one query."""
+        if not company_ids:
+            return []
+        placeholders = ",".join("?" for _ in company_ids)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM companies WHERE id IN ({placeholders})",
+                tuple(company_ids),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     # ── Settings (operational flags: kill switch, counters) ──
 
     async def get_setting(self, key: str, default: str = "") -> str:

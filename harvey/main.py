@@ -200,6 +200,22 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
 
+    # The OpenReply bridge, when configured, runs on its own faster clock
+    # alongside this loop. It must not share the heartbeat: approvals made at
+    # 23:00 should be collected then, not at 07:00 when sending resumes, and
+    # the bridge makes no model calls so it costs nothing to run during quiet
+    # hours.
+    bridge_task = None
+    bridge = _build_openreply_bridge(state, config, env)
+    if bridge is not None:
+        bridge_task = asyncio.create_task(bridge.loop(stop_event))
+        logger.info(
+            "OpenReply bridge on: syncing with %s every %ss. "
+            "Approvals happen there.",
+            bridge.base_url,
+            bridge.sync_interval,
+        )
+
     while not stop_event.is_set():
         try:
             # 1. Check quiet hours
@@ -349,7 +365,57 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if await _interruptible_sleep(backoff, stop_event):
                 break
 
+    if bridge_task is not None:
+        # The loop watches the same stop_event, so this is a formality in the
+        # normal case and a hard stop when it is wedged on a slow request.
+        bridge_task.cancel()
+        try:
+            await bridge_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
+
+
+def _build_openreply_bridge(state, config, env):
+    """The bridge, or None when it is not configured.
+
+    Refuses to run rather than running half-configured: an operator who turned
+    it on and mistyped a variable should be told, not left wondering why their
+    phone shows nothing.
+    """
+    openreply = getattr(config, "openreply", None)
+    if openreply is None or not openreply.enabled:
+        return None
+
+    from harvey.integrations.openreply import OpenReplyBridge, OpenReplyClient
+
+    client = OpenReplyClient(
+        base_url=openreply.base_url,
+        agent_id=getattr(env, "openreply_agent_id", ""),
+        secret=getattr(env, "openreply_agent_secret", ""),
+    )
+    if not client.is_configured():
+        logger.error(
+            "openreply.enabled is true but the bridge is not configured. "
+            "Needs openreply.base_url in harvey.yaml plus OPENREPLY_AGENT_ID "
+            "and OPENREPLY_AGENT_SECRET in .env (pair the agent in "
+            "OpenReply: Outreach, then Add agent). Running without the bridge."
+        )
+        return None
+
+    if not config.channels.email.require_approval:
+        # The whole point of the bridge is that a human approves each email.
+        # Running it with approval off would mirror sends after the fact and
+        # hand the operator buttons that decide nothing.
+        logger.error(
+            "openreply.enabled is true but channels.email.require_approval is "
+            "false, so mail would send before anyone could approve it. "
+            "Running without the bridge; set require_approval: true."
+        )
+        return None
+
+    return OpenReplyBridge(state, client, openreply)
 
 
 def _needs_setup() -> bool:

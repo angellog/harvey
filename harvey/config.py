@@ -205,6 +205,85 @@ class BrainConfig(BaseModel):
         return v
 
 
+LINK_MODES = ("replace", "append", "none")
+LINK_DESTINATIONS = ("whatsapp", "default")
+
+
+class OpenReplyConfig(BaseModel):
+    """The bridge to an OpenReply control plane.
+
+    Off by default: Harvey works perfectly well on its own, and nothing here
+    should change for an operator who has never heard of OpenReply. When it is
+    on, the operator approves outgoing mail from their phone and every tracked
+    link is attributed back to the email that carried it.
+
+    No model calls are made by the bridge, so none of this costs Claude quota.
+    """
+
+    enabled: bool = False
+    base_url: str = ""
+    sync_interval_seconds: int = 60
+
+    # How the tracked link gets into the email body. "append" adds one line.
+    # "replace" swaps a URL the Writer was told to include (a booking page)
+    # for the tracked one. "none" disables link minting entirely.
+    link_mode: str = "append"
+    # Never step 1: prompts/writer.md forbids a link in the first touch, and a
+    # cold opener that asks a question beats one that asks for a click.
+    link_from_step: int = 2
+    link_in_replies: bool = False
+    # "whatsapp" uses the agent's configured number, "default" its configured
+    # booking page. Both live in OpenReply, not here, so a stolen Harvey
+    # secret cannot repoint a link at a number the operator never chose.
+    link_destination: str = "whatsapp"
+    # The URL the Writer includes, for link_mode "replace".
+    link_url: str = ""
+    link_cta: str = "If WhatsApp is easier for you:"
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _valid_base_url(cls, v) -> str:
+        v = str(v or "").strip().rstrip("/")
+        if v and not v.startswith("https://"):
+            raise ValueError(
+                "openreply.base_url must start with https:// "
+                "(the agent secret travels over this connection)"
+            )
+        return v
+
+    @field_validator("sync_interval_seconds")
+    @classmethod
+    def _valid_interval(cls, v: int) -> int:
+        if v < 15:
+            raise ValueError("openreply.sync_interval_seconds must be at least 15")
+        return v
+
+    @field_validator("link_mode", mode="before")
+    @classmethod
+    def _valid_link_mode(cls, v) -> str:
+        v = str(v or "append").strip().lower()
+        if v not in LINK_MODES:
+            raise ValueError(f"openreply.link_mode must be one of: {', '.join(LINK_MODES)}")
+        return v
+
+    @field_validator("link_destination", mode="before")
+    @classmethod
+    def _valid_destination(cls, v) -> str:
+        v = str(v or "whatsapp").strip().lower()
+        if v not in LINK_DESTINATIONS:
+            raise ValueError(
+                f"openreply.link_destination must be one of: {', '.join(LINK_DESTINATIONS)}"
+            )
+        return v
+
+    @field_validator("link_from_step")
+    @classmethod
+    def _valid_from_step(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("openreply.link_from_step must be at least 1")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -212,6 +291,7 @@ class HarveyConfig(BaseModel):
     channels: ChannelsConfig = ChannelsConfig()
     usage: UsageConfig = UsageConfig()
     brain: BrainConfig = BrainConfig()
+    openreply: OpenReplyConfig = OpenReplyConfig()
 
 
 class EnvConfig(BaseModel):
@@ -237,6 +317,9 @@ class EnvConfig(BaseModel):
     imap_port: int = 993
     imap_username: str = ""
     imap_password: str = ""
+    # OpenReply bridge (paired in the OpenReply dashboard, Outreach settings)
+    openreply_agent_id: str = ""
+    openreply_agent_secret: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -347,6 +430,8 @@ def load_env() -> EnvConfig:
         imap_port=int(os.getenv("IMAP_PORT", "993").strip() or 993),
         imap_username=os.getenv("IMAP_USERNAME", "").strip(),
         imap_password=os.getenv("IMAP_PASSWORD", "").strip(),
+        openreply_agent_id=os.getenv("OPENREPLY_AGENT_ID", "").strip(),
+        openreply_agent_secret=os.getenv("OPENREPLY_AGENT_SECRET", "").strip(),
     )
     return env
 

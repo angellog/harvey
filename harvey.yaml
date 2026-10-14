@@ -64,3 +64,25 @@ usage:
     start: "22:00"
     end: "07:00"
     timezone: "America/New_York"
+
+# ── OpenReply bridge (optional) ──────────────────────────────────────────────
+# Approve outgoing mail from your phone instead of this machine's dashboard,
+# and have every tracked link attributed back to the email that carried it.
+#
+# Pair the agent in OpenReply (Outreach -> Add agent), put the id and secret
+# in .env as OPENREPLY_AGENT_ID / OPENREPLY_AGENT_SECRET, then set enabled
+# below. The bridge makes no model calls, so it costs nothing against your
+# Claude plan and keeps running during quiet hours.
+#
+# Requires channels.email.require_approval: true. Harvey refuses to run the
+# bridge otherwise, because approving mail that already went out is theatre.
+openreply:
+  enabled: false
+  base_url: ""                 # https://your-openreply.vercel.app
+  sync_interval_seconds: 60
+  link_mode: "append"          # append | replace | none
+  link_from_step: 2            # never 1: no links in a cold first touch
+  link_in_replies: false
+  link_destination: "whatsapp" # whatsapp | default (the agent's booking page)
+  link_url: ""                 # the URL "replace" swaps out
+  link_cta: "If WhatsApp is easier for you:"
