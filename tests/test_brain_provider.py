@@ -347,6 +347,7 @@ async def test_main_heartbeat_builds_brain_from_config(monkeypatch):
 @pytest.mark.asyncio
 async def test_existing_usage_rows_become_claude(tmp_path):
     import aiosqlite
+    from datetime import date
     from harvey.state import MIGRATIONS
 
     db_path = str(tmp_path / "old.db")
@@ -355,7 +356,15 @@ async def test_existing_usage_rows_become_claude(tmp_path):
             await db.executescript(script)
         await db.execute("PRAGMA user_version = 10")
         await db.execute("INSERT INTO usage_events (id, model, output_tokens) VALUES ('a', 'm', 5)")
-        await db.execute("INSERT INTO usage_log (id, date, claude_calls) VALUES ('u', date('now'), 7)")
+        # date('now') is UTC, but get_usage_today() and increment_usage() both
+        # key this table on the LOCAL date. The two differ for part of every
+        # day in any non-UTC zone (east of UTC just after local midnight, west
+        # of it in the evening), and this row has to use the same date the code
+        # under test will look for.
+        await db.execute(
+            "INSERT INTO usage_log (id, date, claude_calls) VALUES ('u', ?, 7)",
+            (date.today().isoformat(),),
+        )
         await db.commit()
 
     sm = StateManager(db_path)
