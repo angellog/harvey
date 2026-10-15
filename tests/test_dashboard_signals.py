@@ -42,7 +42,8 @@ def test_signals_seed_as_proposed_not_confirmed(client):
 def test_signals_grouped_with_plain_language(client):
     data = client.get("/api/signals").json()
     keys = [g["key"] for g in data["groups"]]
-    assert keys == ["discovery", "profile", "people", "verification"]
+    # "engagement" is last: the only group Harvey does not collect itself.
+    assert keys == ["discovery", "profile", "people", "verification", "engagement"]
     for group in data["groups"]:
         assert group["blurb"]  # every category explains itself
         for sig in group["signals"]:

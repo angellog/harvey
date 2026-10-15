@@ -1155,8 +1155,20 @@ CATEGORY_META = {
         "blurb": "Whether the address will actually deliver, and what to do when "
                  "it won't.",
     },
+    "engagement": {
+        "label": "Engagement — what they did after you wrote",
+        "blurb": "The only signals Harvey doesn't collect itself. A connected "
+                 "control plane sees the clicks and the replies that arrive on "
+                 "other channels, and pushes them here. Free, and the reason a "
+                 "sequence can stop when someone answers somewhere else.",
+    },
 }
-CATEGORY_ORDER = ["discovery", "profile", "people", "verification"]
+# Order the signals are grouped in on the signals page. A category missing
+# from this list is silently dropped from the UI, so anything added to
+# SIGNAL_CATALOG has to appear here too (tests/test_dashboard_signals.py
+# enforces it). "engagement" is last because it is the only group Harvey does
+# not collect itself: those facts are pushed in by a control plane.
+CATEGORY_ORDER = ["discovery", "profile", "people", "verification", "engagement"]
 
 
 @app.get("/api/signals")
