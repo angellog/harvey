@@ -291,6 +291,65 @@ SIGNAL_CATALOG: list[dict] = [
         "cost_note": "free (site HTML)",
         "confidence_floor": 0.0,
     },
+    # ── Engagement: what the control plane saw happen after a send ──
+    #
+    # These are the only signals Harvey does not collect itself. They are
+    # pushed in by an OpenReply control plane, which sees the clicks and the
+    # WhatsApp replies that Harvey's own mailbox never will. Free, because
+    # someone else already paid for the page view.
+    {
+        "code": "OR_LINK_CLICKED",
+        "label": "Opened the link in our email",
+        "description": (
+            "They clicked the one link the sequence carries. The cheapest "
+            "proof of interest there is: the address is real, the email was "
+            "opened, and the offer was interesting enough to act on."
+        ),
+        "category": "engagement",
+        "value_type": "num",
+        "collector": "openreply",
+        "cost_note": "free (pushed by OpenReply)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "OR_WHATSAPP_STARTED",
+        "label": "Replied on WhatsApp",
+        "description": (
+            "They answered the email by opening a WhatsApp chat instead of "
+            "replying. The strongest signal in this catalog, and the one that "
+            "must stop the rest of the sequence: continuing to email someone "
+            "who has already answered is the fastest way to lose them."
+        ),
+        "category": "engagement",
+        "value_type": "bool",
+        "collector": "openreply",
+        "cost_note": "free (pushed by OpenReply)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "OR_WHATSAPP_REPLIED",
+        "label": "Still talking on WhatsApp",
+        "description": "A further message in a chat that began from one of our emails.",
+        "category": "engagement",
+        "value_type": "num",
+        "collector": "openreply",
+        "cost_note": "free (pushed by OpenReply)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "OR_RESOURCE_CLAIMED",
+        "label": "Took something from the resource hub",
+        "description": (
+            "They gave an address to get a resource and agreed to hear more. "
+            "A second one from the same person is a louder signal than the "
+            "first: they came back."
+        ),
+        "category": "engagement",
+        "value_type": "text",
+        "collector": "openreply",
+        "cost_note": "free (pushed by OpenReply)",
+        "confidence_floor": 0.0,
+    },
 ]
 
 

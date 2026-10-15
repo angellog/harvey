@@ -533,3 +533,210 @@ async def test_one_bad_row_does_not_cost_the_whole_batch():
 async def test_an_empty_handover_is_not_an_error():
     state = RecordingState()
     assert await _bridge(state)._import_leads([]) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Learning from events
+# ─────────────────────────────────────────────────────────────────────────────
+
+from harvey.integrations.openreply import (  # noqa: E402
+    EVENT_SIGNALS,
+    REPLIED_EVENTS,
+    event_run_id,
+)
+
+
+class EventState(RecordingState):
+    """A fake with just the surface _apply_events touches."""
+
+    def __init__(self, confirmed=None, prospect_by_email=None):
+        super().__init__()
+        self._confirmed = confirmed if confirmed is not None else set(EVENT_SIGNALS.values())
+        self._by_email = prospect_by_email or {}
+        self.observations = []
+        self.runs = set()
+        self.status_changes = []
+        self.cancelled = []
+
+    async def confirmed_signal_codes(self):
+        return self._confirmed
+
+    async def get_prospect_by_email(self, email):
+        return self._by_email.get(email)
+
+    async def observation_exists_for_run(self, run_id):
+        return run_id in self.runs
+
+    async def add_observation(self, signal_code, **kwargs):
+        self.observations.append({"signal_code": signal_code, **kwargs})
+        self.runs.add(kwargs.get("run_id", ""))
+        return "obs_1"
+
+    async def update_prospect_status(self, prospect_id, status):
+        self.status_changes.append((prospect_id, status))
+
+    async def cancel_pending_outbox_for_prospect(self, prospect_id, reason=""):
+        self.cancelled.append((prospect_id, reason))
+        return 2
+
+
+def _event(**kwargs):
+    return {
+        "seq": 10,
+        "type": "LINK_CLICKED",
+        "prospectHarveyId": "p1",
+        "emailHarveyId": "o1",
+        "trackedLinkSlug": "hv_abc123",
+        "payload": {},
+        "at": "2026-10-15T09:00:00+00:00",
+        **kwargs,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_click_becomes_an_observation_with_its_evidence():
+    state = EventState()
+    highest = await _bridge(state)._apply_events([_event()])
+
+    assert highest == 10
+    obs = state.observations[0]
+    assert obs["signal_code"] == "OR_LINK_CLICKED"
+    assert obs["prospect_id"] == "p1"
+    assert obs["collector"] == "openreply"
+    assert obs["evidence_url"].endswith("/r/hv_abc123")
+    assert obs["run_id"] == event_run_id(10)
+
+
+@pytest.mark.asyncio
+async def test_a_whatsapp_reply_stops_the_rest_of_the_sequence():
+    # The whole reason this stream exists. Emailing step 3 to someone who
+    # already answered on WhatsApp is the worst thing a sequence can do.
+    state = EventState()
+    await _bridge(state)._apply_events([_event(type="WHATSAPP_STARTED")])
+
+    assert state.status_changes == [("p1", "replied")]
+    assert state.cancelled == [("p1", "replied_on_whatsapp")]
+    assert state.observations[0]["signal_code"] == "OR_WHATSAPP_STARTED"
+
+
+@pytest.mark.asyncio
+async def test_a_click_alone_does_not_stop_the_sequence():
+    state = EventState()
+    await _bridge(state)._apply_events([_event(type="LINK_CLICKED")])
+
+    assert state.status_changes == []
+    assert state.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_whatsapp_message_is_recorded_without_re_stopping():
+    state = EventState()
+    await _bridge(state)._apply_events([_event(type="WHATSAPP_MESSAGE_IN")])
+
+    assert state.observations[0]["signal_code"] == "OR_WHATSAPP_REPLIED"
+    assert state.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_replaying_an_event_writes_nothing_twice():
+    state = EventState()
+    bridge = _bridge(state)
+    await bridge._apply_events([_event()])
+    await bridge._apply_events([_event()])
+
+    assert len(state.observations) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_signal_is_not_collected():
+    # The user confirms the vocabulary. An unconfirmed code is skipped exactly
+    # as if Harvey had tried to gather it itself.
+    state = EventState(confirmed=set())
+    await _bridge(state)._apply_events([_event()])
+
+    assert state.observations == []
+
+
+@pytest.mark.asyncio
+async def test_stop_on_reply_happens_even_when_the_signal_is_unconfirmed():
+    # Not collecting a signal is a preference. Continuing to email someone who
+    # replied is a mistake, so it is not gated on the same switch.
+    state = EventState(confirmed=set())
+    await _bridge(state)._apply_events([_event(type="WHATSAPP_STARTED")])
+
+    assert state.cancelled == [("p1", "replied_on_whatsapp")]
+    assert state.observations == []
+
+
+@pytest.mark.asyncio
+async def test_a_resource_claim_is_matched_by_address():
+    class P:
+        id = "p9"
+
+    state = EventState(prospect_by_email={"amina@kampalakicks.ug": P()})
+    await _bridge(state)._apply_events(
+        [
+            _event(
+                type="RESOURCE_CLAIMED",
+                prospectHarveyId=None,
+                trackedLinkSlug=None,
+                payload={
+                    "email": "amina@kampalakicks.ug",
+                    "resourceTitle": "The Wholesale Checklist",
+                },
+            )
+        ]
+    )
+
+    assert state.observations[0]["prospect_id"] == "p9"
+    assert state.observations[0]["value_text"] == "The Wholesale Checklist"
+
+
+@pytest.mark.asyncio
+async def test_a_resource_claim_by_a_stranger_is_ignored():
+    state = EventState(prospect_by_email={})
+    highest = await _bridge(state)._apply_events(
+        [_event(type="RESOURCE_CLAIMED", prospectHarveyId=None, payload={"email": "nobody@x.test"})]
+    )
+
+    assert state.observations == []
+    # The cursor still moves: a stranger's download is not a reason to retry
+    # this event forever.
+    assert highest == 10
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_event_type_does_not_stall_the_stream():
+    state = EventState()
+    highest = await _bridge(state)._apply_events([_event(type="SOMETHING_NEW")])
+
+    assert state.observations == []
+    assert highest == 10
+
+
+@pytest.mark.asyncio
+async def test_one_failing_event_does_not_block_the_ones_behind_it():
+    class Exploding(EventState):
+        async def add_observation(self, signal_code, **kwargs):
+            if kwargs.get("prospect_id") == "bad":
+                raise RuntimeError("db gone")
+            return await super().add_observation(signal_code, **kwargs)
+
+    state = Exploding()
+    highest = await _bridge(state)._apply_events(
+        [_event(seq=10, prospectHarveyId="bad"), _event(seq=11, prospectHarveyId="p2")]
+    )
+
+    assert highest == 11
+    assert [o["prospect_id"] for o in state.observations] == ["p2"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stream_leaves_the_cursor_alone():
+    state = EventState()
+    assert await _bridge(state)._apply_events([]) == 0
+
+
+def test_every_event_type_has_a_signal_and_replies_are_a_subset():
+    assert set(REPLIED_EVENTS) <= set(EVENT_SIGNALS)
+    assert all(code.startswith("OR_") for code in EVENT_SIGNALS.values())

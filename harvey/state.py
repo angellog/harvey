@@ -1056,6 +1056,22 @@ class StateManager:
             await db.commit()
         return obs_id
 
+    async def observation_exists_for_run(self, run_id: str) -> bool:
+        """Whether anything was already recorded under this run id.
+
+        Observations have no unique constraint, by design: re-observing the
+        same signal over time is a free time series. That makes it the
+        caller's job to say when a write is a replay rather than a new
+        reading, and a run id is how they say it.
+        """
+        if not run_id:
+            return False
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM observations WHERE run_id = ? LIMIT 1", (run_id,)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
     async def add_observations(self, rows: list[dict], run_id: str = "") -> int:
         """Batch insert. Flushed per batch by callers — a long run that dies
         must not lose everything it observed."""

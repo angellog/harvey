@@ -353,6 +353,40 @@ class CommandApplier:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Learning from what happened after a send
+#
+# Harvey can read its own mailbox and nothing else. A click and a WhatsApp
+# reply both happen on the control plane, so they arrive here as events and
+# become observations — the same row shape every other signal uses, so Scout
+# scores them without knowing where they came from.
+#
+# One of these matters more than the rest. Someone who answers on WhatsApp has
+# answered; continuing to email them step 3 is the worst thing a sequence can
+# do, so that event stops the sequence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EVENT_SIGNALS = {
+    "LINK_CLICKED": "OR_LINK_CLICKED",
+    "WHATSAPP_STARTED": "OR_WHATSAPP_STARTED",
+    "WHATSAPP_MESSAGE_IN": "OR_WHATSAPP_REPLIED",
+    "RESOURCE_CLAIMED": "OR_RESOURCE_CLAIMED",
+}
+
+# Events that mean the prospect has answered, on a channel we do not own.
+REPLIED_EVENTS = {"WHATSAPP_STARTED"}
+
+
+def event_run_id(seq) -> str:
+    """Identity for an event's observation.
+
+    Harvey's observations have no unique constraint, so re-applying an event
+    would otherwise write a second identical row. The run id makes a replay
+    detectable, which is what lets the cursor be advanced optimistically.
+    """
+    return f"openreply-event-{seq}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Payload builders
 #
 # Pure functions from Harvey's own row shapes to the wire shapes. Separated
@@ -439,6 +473,10 @@ def _as_wire_timestamp(value) -> str | None:
 # running instance does not re-send its whole database every minute.
 CURSOR_PROSPECTS = "openreply.cursor.prospects"
 CURSOR_OUTBOX = "openreply.cursor.outbox"
+# The event stream's cursor: the highest seq already applied. Kept here rather
+# than on the server so a Harvey that loses its database can replay from zero;
+# every handler below is idempotent, so a replay costs time and nothing else.
+CURSOR_EVENTS = "openreply.cursor.events"
 LAST_OK_KEY = "openreply.last_ok"
 LAST_ERROR_KEY = "openreply.last_error"
 
@@ -519,6 +557,98 @@ class OpenReplyBridge:
         minted = await self._mint_links()
         pushed = await self._push()
         return {"minted": minted, **pushed}
+
+    async def _apply_events(self, events: list[dict]) -> int:
+        """Turn what the control plane saw into observations, and stop a
+        sequence when the prospect has already answered elsewhere.
+
+        Returns the highest seq applied, so the caller can advance its cursor.
+        Events arrive oldest first and each one is applied on its own: a single
+        unprocessable event advances the cursor past itself rather than
+        wedging the stream behind it forever.
+        """
+        if not events:
+            return 0
+
+        confirmed = await self.state.confirmed_signal_codes()
+        highest = 0
+
+        for event in events:
+            seq = event.get("seq") or 0
+            try:
+                await self._apply_event(event, confirmed)
+            except Exception as exc:
+                self.log.warning(
+                    "openreply: could not apply event %s (%s): %s",
+                    seq,
+                    event.get("type"),
+                    exc,
+                )
+            highest = max(highest, int(seq))
+
+        return highest
+
+    async def _apply_event(self, event: dict, confirmed: set) -> None:
+        kind = event.get("type") or ""
+        signal = EVENT_SIGNALS.get(kind)
+        if not signal:
+            return
+
+        prospect_id = event.get("prospectHarveyId") or ""
+        payload = event.get("payload") or {}
+
+        # A resource download names an address rather than a prospect, because
+        # whoever took it may be nobody we know yet. Only the agent that
+        # already has them does anything with it.
+        if not prospect_id and kind == "RESOURCE_CLAIMED":
+            email = (payload.get("email") or "").strip().lower()
+            if not email:
+                return
+            prospect = await self.state.get_prospect_by_email(email)
+            if not prospect:
+                return
+            prospect_id = prospect.id
+
+        if not prospect_id:
+            return
+
+        # Stop-on-reply first, so a crash between here and the observation
+        # leaves the sequence stopped rather than still running.
+        if kind in REPLIED_EVENTS:
+            await self.state.update_prospect_status(prospect_id, "replied")
+            cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                prospect_id, reason="replied_on_whatsapp"
+            )
+            if cancelled:
+                self.log.info(
+                    "openreply: %s replied on WhatsApp, stopped %d queued email(s)",
+                    prospect_id,
+                    cancelled,
+                )
+
+        # The user confirms the signal vocabulary; an unconfirmed code is not
+        # collected, exactly as if Harvey had gathered it itself.
+        if signal not in confirmed:
+            return
+
+        run_id = event_run_id(event.get("seq"))
+        if await self.state.observation_exists_for_run(run_id):
+            return
+
+        await self.state.add_observation(
+            signal,
+            prospect_id=prospect_id,
+            collector="openreply",
+            value_num=1.0,
+            value_text=str(payload.get("resourceTitle") or payload.get("body") or "")[:500],
+            evidence_url=(
+                f"{self.base_url}/r/{event['trackedLinkSlug']}"
+                if event.get("trackedLinkSlug")
+                else ""
+            ),
+            run_id=run_id,
+            observed_at=event.get("at"),
+        )
 
     async def _import_leads(self, leads: list[dict]) -> list[str]:
         """Take people who asked for something and agreed to hear more.
@@ -651,6 +781,7 @@ class OpenReplyBridge:
             },
             "acks": self._pending_acks,
             "leadAcks": self._pending_lead_acks,
+            "eventCursor": int(await self.state.get_setting(CURSOR_EVENTS, "0") or 0),
             "companies": [company_payload(row) for row in companies],
             "prospects": [prospect_payload(row) for row in prospects],
             "emails": [email_payload(row) for row in emails],
@@ -682,6 +813,12 @@ class OpenReplyBridge:
         # command that acts on it in the same cycle should find it there.
         self._pending_lead_acks = await self._import_leads(data.get("leads") or [])
 
+        # Applied before commands, so an approval that arrives in the same
+        # cycle as "they already replied" finds the sequence already stopped.
+        applied_to = await self._apply_events(data.get("events") or [])
+        if applied_to:
+            await self.state.set_setting(CURSOR_EVENTS, str(applied_to))
+
         commands = data.get("commands") or []
         applied = []
         for command in commands:
@@ -697,6 +834,7 @@ class OpenReplyBridge:
             "companies": len(companies),
             "commands": len(applied),
             "leads": len(self._pending_lead_acks),
+            "events": len(data.get("events") or []),
         }
 
     async def _rows_since(self, table: str, cursor: str) -> list[dict]:
