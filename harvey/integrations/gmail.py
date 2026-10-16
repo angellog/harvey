@@ -24,7 +24,7 @@ from email.utils import parseaddr
 
 import httpx
 
-from harvey.paths import PROJECT_ROOT
+from harvey.paths import DATA_DIR
 from harvey.integrations.mail_provider import (
     InboundMessage,
     MailProvider,
@@ -34,7 +34,7 @@ from harvey.integrations.mail_provider import (
 
 logger = logging.getLogger("harvey.gmail")
 
-TOKEN_FILE = PROJECT_ROOT / "data" / "gmail_token.json"
+TOKEN_FILE = DATA_DIR / "gmail_token.json"
 API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"

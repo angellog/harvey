@@ -420,10 +420,10 @@ def _build_openreply_bridge(state, config, env):
 
 def _needs_setup() -> bool:
     """Check if Harvey needs first-time setup."""
-    from harvey.paths import PROJECT_ROOT
+    from harvey.paths import ENV_FILE
     from harvey.config import _find_config_file, ConfigFileNotFoundError
 
-    env_file = PROJECT_ROOT / ".env"
+    env_file = ENV_FILE
 
     # If .env doesn't exist, definitely needs setup
     if not env_file.exists():

@@ -22,9 +22,9 @@ from harvey.models.prospect import Prospect
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
-from harvey.paths import PROJECT_ROOT
+from harvey.paths import DATA_DIR
 
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
+DB_PATH = DATA_DIR / "harvey.db"
 
 # How long (seconds) a connection waits on a locked database before failing.
 BUSY_TIMEOUT_SECONDS = 30.0
