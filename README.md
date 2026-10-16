@@ -418,6 +418,17 @@ harvey gmail auth            # one-time Gmail OAuth
 ```
 
 
+### Running more than one Harvey
+
+One checkout can run several fully separate Harveys (different product, mailbox, database). Point `HARVEY_HOME` at a folder holding that instance's `harvey.yaml` (or `harvey.local.yaml`) and `.env`:
+
+```bash
+HARVEY_HOME=~/Projects/other-product/harvey harvey run
+HARVEY_HOME=~/Projects/other-product/harvey harvey dashboard --port 5556
+```
+
+The instance keeps its own `data/` (database, Gmail token, pid, log) and its own trained `skills/product_knowledge.md` / `competitive_intel.md`. Prompts and the shared skills library still come from the checkout. With `HARVEY_HOME` set, Harvey never falls back to the checkout's config or `.env`. Without it, nothing changes.
+
 ## Using a ChatGPT plan instead (Codex)
 
 Claude is the default and needs no change. If you'd rather spend a ChatGPT plan (Plus, Pro, Business, …), Harvey can think through the [Codex CLI](https://developers.openai.com/codex) instead — still a subscription, never per-token API billing.

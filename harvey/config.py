@@ -10,7 +10,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError, field_validator
 
-from harvey.paths import PROJECT_ROOT
+from harvey.paths import ENV_FILE, INSTANCE_MODE, INSTANCE_ROOT, PROJECT_ROOT
 
 logger = logging.getLogger("harvey.config")
 
@@ -407,8 +407,15 @@ def load_brain_config(config_path: str | None = None) -> BrainConfig:
 
 
 def load_env() -> EnvConfig:
-    """Load environment variables from .env file."""
-    load_dotenv()
+    """Load environment variables from .env file.
+
+    With HARVEY_HOME set, only the instance's own .env is read, so a second
+    Harvey never picks up another instance's mailbox or API keys.
+    """
+    if INSTANCE_MODE:
+        load_dotenv(str(ENV_FILE), override=True)
+    else:
+        load_dotenv()
     env = EnvConfig(
         instantly_api_key=os.getenv("INSTANTLY_API_KEY", "").strip(),
         dataforseo_login=os.getenv("DATAFORSEO_LOGIN", "").strip(),
@@ -444,13 +451,17 @@ def _find_config_file() -> str:
     the tracked ``harvey.yaml`` stays an untrained template — nobody
     publishes their positioning, pricing, and prospect targeting by accident.
     """
-    candidates = [
-        Path.cwd() / "harvey.local.yaml",
-        PROJECT_ROOT / "harvey.local.yaml",
-        Path.cwd() / "harvey.yaml",
-        Path.cwd().parent / "harvey.yaml",
-        PROJECT_ROOT / "harvey.yaml",
-    ]
+    if INSTANCE_MODE:
+        # A separate instance must never fall back to the checkout's config.
+        candidates = [INSTANCE_ROOT / "harvey.local.yaml", INSTANCE_ROOT / "harvey.yaml"]
+    else:
+        candidates = [
+            Path.cwd() / "harvey.local.yaml",
+            PROJECT_ROOT / "harvey.local.yaml",
+            Path.cwd() / "harvey.yaml",
+            Path.cwd().parent / "harvey.yaml",
+            PROJECT_ROOT / "harvey.yaml",
+        ]
     for path in candidates:
         if path.exists():
             return str(path)

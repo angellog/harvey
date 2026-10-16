@@ -19,7 +19,7 @@ from harvey.state import StateManager
 
 logger = logging.getLogger("harvey.brain")
 
-from harvey.paths import PROJECT_ROOT
+from harvey.paths import PROJECT_ROOT, SKILLS_DIRS  # SKILLS_DIRS: instance skills first
 
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 SKILLS_DIR = PROJECT_ROOT / "skills"
@@ -653,7 +653,10 @@ class Brain:
 
     def load_skill(self, skill_name: str) -> str:
         """Load a skill knowledge file from the skills/ directory."""
-        skill_file = SKILLS_DIR / f"{skill_name}.md"
+        skill_file = next(
+            (d / f"{skill_name}.md" for d in SKILLS_DIRS if (d / f"{skill_name}.md").exists()),
+            SKILLS_DIR / f"{skill_name}.md",
+        )
         try:
             return skill_file.read_text()
         except FileNotFoundError:

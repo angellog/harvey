@@ -21,12 +21,12 @@ from fastapi.responses import (
 
 logger = logging.getLogger("harvey.dashboard")
 
-from harvey.paths import PROJECT_ROOT  # noqa: E402
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
-ENV_FILE = PROJECT_ROOT / ".env"
-CONFIG_FILE = PROJECT_ROOT / "harvey.yaml"
-PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
-LOG_FILE = PROJECT_ROOT / "data" / "harvey.log"
+from harvey.paths import DATA_DIR, ENV_FILE as _ENV_FILE, INSTANCE_ROOT, PROJECT_ROOT, SKILLS_DIRS  # noqa: E402
+DB_PATH = DATA_DIR / "harvey.db"
+ENV_FILE = _ENV_FILE
+CONFIG_FILE = INSTANCE_ROOT / "harvey.yaml"
+PID_FILE = DATA_DIR / "harvey.pid"
+LOG_FILE = DATA_DIR / "harvey.log"
 
 
 def _resolve_config_file() -> Path:
@@ -147,7 +147,7 @@ async def get_setup_status():
 
     if provider == "gmail":
         provider_done = _has("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET") and \
-            (PROJECT_ROOT / "data" / "gmail_token.json").is_file()
+            (DATA_DIR / "gmail_token.json").is_file()
         provider_help = ("Set GMAIL_CLIENT_ID/SECRET in Settings, then run "
                          "'harvey gmail auth' in your terminal.")
     elif provider == "smtp":
@@ -194,7 +194,7 @@ async def get_setup_status():
     })
 
     # 6. Product trained
-    product_trained = (PROJECT_ROOT / "skills" / "product_knowledge.md").exists()
+    product_trained = any((d / "product_knowledge.md").exists() for d in SKILLS_DIRS)
     checks.append({
         "id": "product_trained", "label": "Product knowledge trained",
         "done": product_trained,
@@ -266,7 +266,7 @@ async def get_settings():
         return bool((env_vars.get(k) or "").strip())
 
     # Gmail is authorized once harvey gmail auth has stored a token file.
-    gmail_token = (PROJECT_ROOT / "data" / "gmail_token.json").is_file()
+    gmail_token = (DATA_DIR / "gmail_token.json").is_file()
 
     return {
         "provider": _current_provider(),
@@ -442,7 +442,7 @@ async def start_harvey():
         return {"success": False, "message": "Harvey is already running."}
 
     # Ensure data dir exists
-    (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         log_handle = open(LOG_FILE, "a")
